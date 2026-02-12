@@ -2,14 +2,15 @@ import Cocoa
 import WebKit
 
 // ── Configuration ───────────────────────────────────────────────
-let kOrgID           = "af51a4d2-5834-4b3b-aa7a-66fe034b5402"
 let kRefreshSeconds  = 300.0   // 5 minutes
+let kDefaultsOrgKey  = "orgID"
 // ────────────────────────────────────────────────────────────────
 
-let kCreditsURL = URL(string:
-    "https://platform.claude.com/api/organizations/\(kOrgID)/prepaid/credits")!
-let kLoginURL = URL(string:
-    "https://platform.claude.com/settings/billing")!
+let kLoginURL = URL(string: "https://platform.claude.com/settings/billing")!
+
+func creditsURL(orgID: String) -> URL {
+    URL(string: "https://platform.claude.com/api/organizations/\(orgID)/prepaid/credits")!
+}
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
@@ -18,20 +19,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var webView: WKWebView!
     var isLoggedIn = false
 
+    var orgID: String {
+        get { UserDefaults.standard.string(forKey: kDefaultsOrgKey) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: kDefaultsOrgKey) }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Shared WKWebView (keeps cookies across fetches)
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         webView = WKWebView(frame: .zero, configuration: config)
 
-        // Status item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "$…"
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(
             ofSize: NSFont.systemFontSize, weight: .regular)
 
         rebuildMenu()
-        fetchCredits()
+
+        if orgID.isEmpty {
+            showOrgPrompt()
+        } else {
+            fetchCredits()
+        }
 
         timer = Timer.scheduledTimer(timeInterval: kRefreshSeconds,
                                      target: self,
@@ -50,11 +59,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Log In to Anthropic…",
                                 action: #selector(showLogin),
                                 keyEquivalent: "l"))
+        menu.addItem(NSMenuItem(title: "Set Organization ID…",
+                                action: #selector(showOrgPrompt),
+                                keyEquivalent: "o"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit",
                                 action: #selector(NSApplication.terminate(_:)),
                                 keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    // MARK: - Org ID prompt
+
+    @objc func showOrgPrompt() {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "Organization ID"
+        alert.informativeText = "Find it in the URL after logging in:\nplatform.claude.com/settings/billing\n→ /organizations/<this-id>/…"
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        field.stringValue = orgID
+        field.placeholderString = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                orgID = value
+                fetchCredits()
+            }
+        }
     }
 
     // MARK: - Login window
@@ -82,12 +120,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Fetch balance
 
     @objc func fetchCredits() {
-        // Use the WKWebView's cookie store to make an authenticated request.
+        guard !orgID.isEmpty else { return }
+
+        let url = creditsURL(orgID: orgID)
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
-            var request = URLRequest(url: kCreditsURL)
+            var request = URLRequest(url: url)
             request.httpMethod = "GET"
             let header = cookies
-                .filter { kCreditsURL.host?.contains($0.domain.dropFirst()) == true || $0.domain == kCreditsURL.host }
+                .filter { url.host?.contains($0.domain.dropFirst()) == true || $0.domain == url.host }
                 .map { "\($0.name)=\($0.value)" }
                 .joined(separator: "; ")
             request.setValue(header, forHTTPHeaderField: "Cookie")
@@ -107,7 +147,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let data = data,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let cents = json["amount"] as? Int else {
-            // Likely not logged in — prompt user
             statusItem.button?.title = "$--"
             if !isLoggedIn { showLogin() }
             return
